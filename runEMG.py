@@ -61,7 +61,6 @@ win = visual.Window(size=(800, 600), fullscr=False, color='grey')
 rest_text = visual.TextStim(win, text='Rest', height=0.1, color='white', pos=(0, 0))
 
 # Preload image stimuli for each hand pose from the "positions" folder.
-# It is assumed that images are named "Fist.png", "Open.png", etc.
 image_stimuli = {}
 for pose in hand_poses:
     image_path = os.path.join("positions", f"{pose}.jpg")
@@ -148,7 +147,7 @@ try:
                 
                 # ===== HAND POSE RECORDING =====
                 if cyton_in:
-                    board.get_board_data()  # flush board's buffer before hand pose period
+                    board.get_board_data()  
                 image_stimuli[pose].draw()
                 win.flip()
                 hand_start = core.getTime()
@@ -220,10 +219,9 @@ if cyton_in:
     print("Dataset shape:", X.shape)
     print("Labels shape:", y.shape)
     
-    # Split into train and test sets (e.g., 80/20 split)
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
     
-    # EEGNet implementation (minimal version)
+    # EEGNet implementation 
     def EEGNet(nb_classes, Chans, Samples, dropoutRate=0.5, kernLength=64, F1=8, D=2, F2=16, dropoutType='Dropout'):
         if dropoutType == 'SpatialDropout2D':
             dropoutTypeLayer = tf.keras.layers.SpatialDropout2D
@@ -253,8 +251,8 @@ if cyton_in:
         return Model(inputs=input1, outputs=softmax)
     
     nb_classes = len(label_map)
-    Chans = X.shape[1]      # number of channels
-    Samples = X.shape[2]    # number of samples (should be 600)
+    Chans = X.shape[1]      # number of channel
+    Samples = X.shape[2]    
     
     model = EEGNet(nb_classes, Chans, Samples)
     model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
