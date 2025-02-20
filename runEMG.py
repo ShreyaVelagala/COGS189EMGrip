@@ -5,6 +5,7 @@ import pickle
 import glob, sys, time, serial
 #from brainflow.board_shim import BoardShim, BrainFlowInputParams
 from serial import Serial
+from scipy.signal import iirnotch, filtfilt  # for notch filtering
 
 import tensorflow as tf
 from tensorflow.keras.models import Model
@@ -44,6 +45,8 @@ rest_duration = 5       # Duration in seconds for the rest period
 trial_duration = 5      # Duration in seconds for the hand pose period (recording period)
 reaction_time = 0.6     # Seconds to discard at the beginning of each trial (to account for reaction/movement time)
 sample_rate = 250       # OpenBCI board sampling rate (Hz)
+
+desired_channels = [0, 1, 2]
 
 save_dir = f'data/emg_handposes/sub-{subject:02d}/ses-{session:02d}/'
 os.makedirs(save_dir, exist_ok=True)
@@ -130,11 +133,18 @@ try:
                     rest_data = board.get_board_data()  # shape: (n_channels, n_samples)
                     discard_samples = int(reaction_time * sample_rate)
                     if rest_data.shape[1] > discard_samples:
-                        rest_data = rest_data[:, discard_samples:]
+                        rest_data = rest_data[desired_channels, discard_samples:]
                     else:
                         rest_data = np.empty((rest_data.shape[0], 0))
+                    # Apply notch filter to remove 60 Hz line noise
+                    f0 = 60.0
+                    Q = 30.0
+                    b, a = iirnotch(f0, Q, sample_rate)
+                    rest_data = filtfilt(b, a, rest_data, axis=1)
+                                         
                 else:
                     rest_data = None
+            
                 trial_data_rest = {
                     "pose": "rest",
                     "round": rnd,
@@ -156,9 +166,14 @@ try:
                     hand_data = board.get_board_data()  # shape: (n_channels, n_samples)
                     discard_samples = int(reaction_time * sample_rate)
                     if hand_data.shape[1] > discard_samples:
-                        hand_data = hand_data[:, discard_samples:]
+                        hand_data = hand_data[desired_channels, discard_samples:]
                     else:
                         hand_data = np.empty((hand_data.shape[0], 0))
+                    # Apply notch filter to remove 60 Hz line noise
+                    f0 = 60.0
+                    Q = 30.0
+                    b, a = iirnotch(f0, Q, sample_rate)
+                    hand_data = filtfilt(b, a, rest_data, axis=1)
                 else:
                     hand_data = None
                 trial_data_hand = {
