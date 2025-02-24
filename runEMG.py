@@ -3,16 +3,9 @@ import numpy as np
 import os
 import pickle
 import glob, sys, time, serial
-#from brainflow.board_shim import BoardShim, BrainFlowInputParams
+from brainflow.board_shim import BoardShim, BrainFlowInputParams
 from serial import Serial
 from scipy.signal import iirnotch, filtfilt  # for notch filtering
-
-import tensorflow as tf
-from tensorflow.keras.models import Model
-from tensorflow.keras.layers import Input, Conv2D, BatchNormalization, DepthwiseConv2D, SeparableConv2D, AveragePooling2D, Dropout, Flatten, Dense, Activation
-from tensorflow.keras.constraints import max_norm
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import accuracy_score
 
 
 
@@ -30,10 +23,11 @@ def wait_with_esc(duration):
 
 
 
+
 # =======================
 # Experiment Parameters
 # =======================
-cyton_in = False  # Set to True when using the Cyton board
+cyton_in = True  # Set to True when using the Cyton board
 subject = 1
 session = 1
 
@@ -46,7 +40,7 @@ trial_duration = 5      # Duration in seconds for the hand pose period (recordin
 reaction_time = 0.6     # Seconds to discard at the beginning of each trial (to account for reaction/movement time)
 sample_rate = 250       # OpenBCI board sampling rate (Hz)
 
-desired_channels = [0, 1, 2]
+desired_channels = [1, 5, 8]
 
 save_dir = f'data/emg_handposes/sub-{subject:02d}/ses-{session:02d}/'
 os.makedirs(save_dir, exist_ok=True)
@@ -58,7 +52,7 @@ hand_poses = ['fist', 'flat', 'okay', 'two']
 # =======================
 # Setup PsychoPy Window
 # =======================
-win = visual.Window(size=(800, 600), fullscr=False, color='grey')
+win = visual.Window(size=(800, 600), fullscr=False,  units="norm", color='grey')
 
 # Create a stimulus for the rest period
 rest_text = visual.TextStim(win, text='Rest', height=0.1, color='white', pos=(0, 0))
@@ -164,7 +158,8 @@ try:
                 wait_with_esc(trial_duration)
                 if cyton_in:
                     hand_data = board.get_board_data()  # shape: (n_channels, n_samples)
-                    discard_samples = int(reaction_time * sample_rate)
+                    discard_samples = int(
+                         * sample_rate)
                     if hand_data.shape[1] > discard_samples:
                         hand_data = hand_data[desired_channels, discard_samples:]
                     else:
@@ -211,7 +206,8 @@ print("Experiment finished normally. Data saved to:", save_file)
 # =======================
 # Offline Classification Using EEGNet(No windowing)
 # =======================
-if cyton_in:
+"""
+if classify:
     # Build the dataset from trial_results
     # Assume each trial's data has shape (n_channels, n_samples). For our paradigm,
     X_list = []
@@ -281,3 +277,5 @@ if cyton_in:
     print("Test accuracy: {:.2f}%".format(test_acc * 100))
 else:
     print("No data available for classification (cyton_in is False).")
+
+"""
