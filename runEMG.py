@@ -27,18 +27,19 @@ def wait_with_esc(duration):
 # =======================
 # Experiment Parameters
 # =======================
-cyton_in = True  # Set to True when using the Cyton board
+cyton_in = True
 subject = 1
 session = 1
+sampling_rate = 250
+reaction_time = 0.6  # 600 ms
+discard_samples = int(reaction_time * sampling_rate)  # e.g. 150 samples
 
-# Define experiment structure:
-n_rounds_per_pose = 2   # Number of rounds per hand pose
-n_cycles = 5            # Number of rest/hand cycles per round
-
-rest_duration = 5       # Duration in seconds for the rest period
-trial_duration = 5      # Duration in seconds for the hand pose period (recording period)
-reaction_time = 0.6     # Seconds to discard at the beginning of each trial (to account for reaction/movement time)
-sample_rate = 250       # OpenBCI board sampling rate (Hz)
+n_rounds_per_pose = 3
+n_cycles = 5
+rest_duration_seconds = 5
+trial_duration_seconds = 5
+rest_samples = int(rest_duration_seconds * sampling_rate)   
+trial_samples = int(trial_duration_seconds * sampling_rate) 
 
 desired_channels = [1, 5, 8]
 
@@ -101,6 +102,23 @@ if cyton_in:
     board.prepare_session()
     board.start_stream(45000)
 
+def collect_fixed_samples(num_samples):
+    """
+    Continuously poll board.get_board_data() until 'num_samples' is reached.
+    Returns the concatenated data array of shape (n_channels, num_samples).
+    """
+    collected = np.empty((0))
+    while True:
+        new_data = board.get_board_data()  # shape: (n_channels, n_new)
+        if new_data.size > 0:
+            if collected.size == 0:
+                collected = new_data
+            else:
+                collected = np.concatenate((collected, new_data), axis=1)
+        if collected.shape[1] >= num_samples:
+            break
+        core.wait(0.01)  # small pause to avoid busy loop
+    return collected[:, :num_samples]
 
 # =======================
 # Main Experiment Loop
@@ -110,77 +128,52 @@ if cyton_in:
 trial_results = []
 
 try:
-    # Loop through each hand pose
     for pose in hand_poses:
-        # For each hand pose, run a number of rounds
         for rnd in range(1, n_rounds_per_pose + 1):
-            # For each round, run a number of cycles
             for cycle in range(1, n_cycles + 1):
-                # ===== REST PERIOD RECORDING =====
-                if cyton_in:
-                    board.get_board_data()  # flush the board's buffer
+                # --- Rest Period (Display) ---
                 rest_text.draw()
                 win.flip()
-                rest_start = core.getTime()
-                wait_with_esc(rest_duration)
+                wait_with_esc(rest_duration_seconds)
+
+                # --- Rest Data ---
                 if cyton_in:
-                    rest_data = board.get_board_data()  # shape: (n_channels, n_samples)
-                    discard_samples = int(reaction_time * sample_rate)
-                    if rest_data.shape[1] > discard_samples:
-                        rest_data = rest_data[desired_channels, discard_samples:]
-                    else:
-                        rest_data = np.empty((rest_data.shape[0], 0))
-                    # Apply notch filter to remove 60 Hz line noise
-                    f0 = 60.0
-                    Q = 30.0
-                    b, a = iirnotch(f0, Q, sample_rate)
-                    rest_data = filtfilt(b, a, rest_data, axis=1)
-                                         
+                    board.get_board_data()  # flush buffer
+                    rest_data = collect_fixed_samples(rest_samples)
                 else:
                     rest_data = None
-            
+
                 trial_data_rest = {
-                    "pose": "rest",
+                    "pose": "Rest",
                     "round": rnd,
                     "cycle": cycle,
-                    "start_time": rest_start,
-                    "duration": rest_duration,
+                    "samples": rest_samples,
                     "data": rest_data
                 }
                 trial_results.append(trial_data_rest)
-                
-                # ===== HAND POSE RECORDING =====
-                if cyton_in:
-                    board.get_board_data()  
-                image_stimuli[pose].draw()
+
+                # --- Pose Period (Display) ---
+                pose_text.text = f"Perform: {pose}"
+                pose_text.draw()
                 win.flip()
-                hand_start = core.getTime()
-                wait_with_esc(trial_duration)
+                wait_with_esc(trial_duration_seconds)
+
+                # --- Pose Data ---
                 if cyton_in:
-                    hand_data = board.get_board_data()  # shape: (n_channels, n_samples)
-                    discard_samples = int(
-                         * sample_rate)
-                    if hand_data.shape[1] > discard_samples:
-                        hand_data = hand_data[desired_channels, discard_samples:]
-                    else:
-                        hand_data = np.empty((hand_data.shape[0], 0))
-                    # Apply notch filter to remove 60 Hz line noise
-                    f0 = 60.0
-                    Q = 30.0
-                    b, a = iirnotch(f0, Q, sample_rate)
-                    hand_data = filtfilt(b, a, rest_data, axis=1)
+                    board.get_board_data()  # flush buffer
+                    pose_data = collect_fixed_samples(trial_samples)
                 else:
-                    hand_data = None
-                trial_data_hand = {
+                    pose_data = None
+
+                trial_data_pose = {
                     "pose": pose,
                     "round": rnd,
                     "cycle": cycle,
-                    "start_time": hand_start,
-                    "duration": trial_duration,
-                    "data": hand_data
+                    "samples": trial_samples,
+                    "data": pose_data
                 }
-                trial_results.append(trial_data_hand)
-                
+                trial_results.append(trial_data_pose)
+             
 
                 
 except EscapeException:
@@ -196,86 +189,18 @@ if cyton_in:
     board.stop_stream()
     board.release_session()
 
+
+for trial in trial_results:
+    data = trial["data"]
+    if data is not None and data.shape[1] > discard_samples:
+        data = data[:, discard_samples:]
+    else:
+        # either not enough data or None
+        data = np.empty((data.shape[0], 0)) if data is not None else None
+    trial["data"] = data
+
 # Save the collected data only if the experiment finished normally
 with open(save_file, 'wb') as f:
     pickle.dump(trial_results, f)
 
 print("Experiment finished normally. Data saved to:", save_file)
-
-
-# =======================
-# Offline Classification Using EEGNet(No windowing)
-# =======================
-"""
-if classify:
-    # Build the dataset from trial_results
-    # Assume each trial's data has shape (n_channels, n_samples). For our paradigm,
-    X_list = []
-    y_list = []
-    # Map labels to integers
-    label_map = {"fist": 0, "flat": 1, "okay": 2, "two": 3, "rest": 4}
-    
-    for trial in trial_results:
-        data = trial["data"]
-        if data is not None and data.size > 0:
-            X_list.append(data)
-            y_list.append(label_map[trial["pose"]])
-    
-    X = np.array(X_list)  # expected shape: (n_trials, n_channels, n_samples)
-    y = np.array(y_list)
-    
-    # Add a singleton channel dimension so that X has shape (n_trials, n_channels, n_samples, 1) for EEGNet convolutions
-    X = X[..., np.newaxis]
-    
-    print("Dataset shape:", X.shape)
-    print("Labels shape:", y.shape)
-    
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    
-    # EEGNet implementation 
-    def EEGNet(nb_classes, Chans, Samples, dropoutRate=0.5, kernLength=64, F1=8, D=2, F2=16, dropoutType='Dropout'):
-        if dropoutType == 'SpatialDropout2D':
-            dropoutTypeLayer = tf.keras.layers.SpatialDropout2D
-        else:
-            dropoutTypeLayer = tf.keras.layers.Dropout
-
-        input1 = Input(shape=(Chans, Samples, 1))
-        block1 = Conv2D(F1, (1, kernLength), padding='same', use_bias=False)(input1)
-        block1 = BatchNormalization()(block1)
-        block1 = DepthwiseConv2D((Chans, 1), use_bias=False, depth_multiplier=D,
-                                 depthwise_constraint=max_norm(1.))(block1)
-        block1 = BatchNormalization()(block1)
-        block1 = Activation('elu')(block1)
-        block1 = AveragePooling2D((1, 4))(block1)
-        block1 = dropoutTypeLayer(dropoutRate)(block1)
-
-        block2 = SeparableConv2D(F2, (1, 16), padding='same', use_bias=False)(block1)
-        block2 = BatchNormalization()(block2)
-        block2 = Activation('elu')(block2)
-        block2 = AveragePooling2D((1, 8))(block2)
-        block2 = dropoutTypeLayer(dropoutRate)(block2)
-
-        flatten = Flatten()(block2)
-        dense = Dense(nb_classes, kernel_constraint=max_norm(0.25))(flatten)
-        softmax = Activation('softmax')(dense)
-
-        return Model(inputs=input1, outputs=softmax)
-    
-    nb_classes = len(label_map)
-    Chans = X.shape[1]      # number of channel
-    Samples = X.shape[2]    
-    
-    model = EEGNet(nb_classes, Chans, Samples)
-    model.compile(optimizer='adam', loss='sparse_categorical_crossentropy', metrics=['accuracy'])
-    
-    # Train EEGNet for a few epochs
-    print("Training EEGNet...")
-    model.fit(X_train, y_train, epochs=10, batch_size=16, validation_split=0.2, verbose=1)
-    
-    # Evaluate on the test set
-    test_loss, test_acc = model.evaluate(X_test, y_test, verbose=0)
-    print("Test accuracy: {:.2f}%".format(test_acc * 100))
-else:
-    print("No data available for classification (cyton_in is False).")
-
-"""
