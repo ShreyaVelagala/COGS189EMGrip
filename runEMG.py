@@ -34,14 +34,13 @@ sampling_rate = 250
 reaction_time = 0.6  # 600 ms
 discard_samples = int(reaction_time * sampling_rate)  # e.g. 150 samples
 
-n_rounds_per_pose = 3
+n_rounds_per_pose = 2
 n_cycles = 5
 rest_duration_seconds = 5
 trial_duration_seconds = 5
 rest_samples = int(rest_duration_seconds * sampling_rate)   
 trial_samples = int(trial_duration_seconds * sampling_rate) 
 
-desired_channels = [1, 5, 8]
 
 save_dir = f'data/emg_handposes/sub-{subject:02d}/ses-{session:02d}/'
 os.makedirs(save_dir, exist_ok=True)
@@ -107,14 +106,16 @@ def collect_fixed_samples(num_samples):
     Continuously poll board.get_board_data() until 'num_samples' is reached.
     Returns the concatenated data array of shape (n_channels, num_samples).
     """
-    collected = np.empty((0))
+    collected = np.zeros((8, 0))  # 8 channels, 0 samples to start
     while True:
         new_data = board.get_board_data()  # shape: (n_channels, n_new)
+        eeg_data = new_data[board.get_eeg_channels(CYTON_BOARD_ID)]
         if new_data.size > 0:
             if collected.size == 0:
-                collected = new_data
+                collected = eeg_data
             else:
-                collected = np.concatenate((collected, new_data), axis=1)
+                collected = np.concatenate((collected, eeg_data), axis=1)
+        #print("collected.shape:", collected.shape)
         if collected.shape[1] >= num_samples:
             break
         core.wait(0.01)  # small pause to avoid busy loop
@@ -134,8 +135,7 @@ try:
                 # --- Rest Period (Display) ---
                 rest_text.draw()
                 win.flip()
-                wait_with_esc(rest_duration_seconds)
-
+                #wait_with_esc(rest_duration_seconds)
                 # --- Rest Data ---
                 if cyton_in:
                     board.get_board_data()  # flush buffer
@@ -153,10 +153,9 @@ try:
                 trial_results.append(trial_data_rest)
 
                 # --- Pose Period (Display) ---
-                pose_text.text = f"Perform: {pose}"
-                pose_text.draw()
+                image_stimuli[pose].draw()
                 win.flip()
-                wait_with_esc(trial_duration_seconds)
+                #wait_with_esc(trial_duration_seconds)
 
                 # --- Pose Data ---
                 if cyton_in:
@@ -193,7 +192,7 @@ if cyton_in:
 for trial in trial_results:
     data = trial["data"]
     if data is not None and data.shape[1] > discard_samples:
-        data = data[:, discard_samples:]
+        data = data[:, discard_samples:1200]
     else:
         # either not enough data or None
         data = np.empty((data.shape[0], 0)) if data is not None else None

@@ -6,7 +6,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 import pickle
 import numpy as np
-
+from collections import Counter
 
 pkl_file = 'data\emg_handposes\sub-01\ses-01\emg_trial_data.pkl'
  
@@ -18,6 +18,13 @@ for trial in trial_results:
     if trial["data"] is not None:
         if trial["data"].shape[1] > fixed_length:
             trial["data"] = trial["data"][:,:fixed_length]
+
+
+pose_counts = Counter(trial["pose"] for trial in trial_results)
+
+print("Pose Counts")
+for pose, count in pose_counts.items():
+    print(f"{pose}: {count}")
 
 # Build the dataset from trial_results
 # Assume each trial's data has shape (n_channels, n_samples). For our paradigm,
@@ -32,12 +39,11 @@ for trial in trial_results:
         X_list.append(data)
         y_list.append(label_map[trial["pose"]])
 
-for i, data in enumerate(X_list):
-    print(data.shape)
-
 X = np.array(X_list)  # expected shape: (n_trials, n_channels, n_samples)
 y = np.array(y_list)
 
+
+"""
 # Add a singleton channel dimension so that X has shape (n_trials, n_channels, n_samples, 1) for EEGNet convolutions
 X = X[..., np.newaxis]
 
@@ -91,3 +97,4 @@ test_loss, test_acc = model.evaluate(X_test, y_test, verbose=0)
 print("Test accuracy: {:.2f}%".format(test_acc * 100))
 
 
+"""
