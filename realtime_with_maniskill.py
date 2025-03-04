@@ -16,7 +16,7 @@ np.set_printoptions(precision=3, suppress=True, linewidth=100)
 
 # Hand Animation Joint Map Setup
 
-model = mujoco.MjModel.from_xml_path("Adroit_hand.xml")
+model = mujoco.MjModel.from_xml_path("/Adroit-master/Adroit_hand.xml")
 data = mujoco.MjData(model)
 # Debug print to understand model structure
 print(f"Number of actuators (controls): {model.nu}")
