@@ -3,19 +3,23 @@ import time
 import mujoco
 import mujoco.viewer
 import numpy as np
-import mediapy as media
 import matplotlib.pyplot as plt
 from threading import Thread, Event
 import pickle
 from sklearn.preprocessing import StandardScaler
+from pylsl import StreamInlet, resolve_byprop
 np.set_printoptions(precision=3, suppress=True, linewidth=100)
 
-# Load the model
+SAMPLE_RATE = 250
+selected_channels = [0, 3, 6]
+window_length_sec = 0.2
+window_length = int(window_length_sec * SAMPLE_RATE)
+
+
 model = mujoco.MjModel.from_xml_path("/Users/jmalegaonkar/Desktop/EMGrip/Adroit/Adroit_hand.xml")
 data = mujoco.MjData(model)
-# Debug print to understand model structure
-print(f"Number of actuators (controls): {model.nu}")
-print("Actuator names:", [model.actuator(i).name for i in range(model.nu)])
+# print(f"Number of actuators (controls): {model.nu}")
+# print("Actuator names:", [model.actuator(i).name for i in range(model.nu)])
 
 # Create joint mapping
 joint_map = {}
@@ -24,11 +28,12 @@ for i in range(model.nu):
     joint_name = model.joint(joint_id).name
     joint_map[joint_name] = i
 
-print("\nJoint mapping:")
-for name, idx in joint_map.items():
-    print(f"{name}: {idx}")
+# print("\nJoint mapping:")
+# for name, idx in joint_map.items():
+#     print(f"{name}: {idx}")
 
 def get_desired_configuration(command):
+    """Get the joint configuration for a specific hand pose command"""
     desired_q = np.zeros(model.nu)
     try:
         if command.lower() == "rest":
@@ -123,12 +128,16 @@ def get_desired_configuration(command):
     return desired_q
 
 class HandSimulation:
-    def __init__(self, model, data):
+    """Class to handle the hand simulation and movement logic"""
+    def __init__(self, model, data, hold_time=10.0):
         self.model = model
         self.data = data
         self.current_command = "rest"
         self.command_changed = Event()
         self.exit_flag = Event()
+        self.hold_time = hold_time
+        self.last_command_time = 0
+        self.in_rest_position = True
         
     def set_command(self, command):
         """Set a new command and notify the simulation thread"""
@@ -136,9 +145,15 @@ class HandSimulation:
             self.exit_flag.set()
             return
             
-        self.current_command = command
-        self.command_changed.set()
-        print(f"Received command: {command}")
+        # Only update if it's a new command or we've returned to rest since the last command
+        current_time = time.time()
+        if (command.lower() != self.current_command.lower() or 
+            (self.in_rest_position and current_time - self.last_command_time > 1.0)):
+            
+            self.current_command = command
+            self.last_command_time = current_time
+            self.command_changed.set()
+            print(f"Executing command: {command}")
     
     def move_to_configuration(self, target_config, duration=2.0):
         """Smoothly move the hand to the target configuration over the specified duration"""
@@ -148,7 +163,7 @@ class HandSimulation:
         # Animation parameters
         start_time = time.time()
         
-        while time.time() - start_time < duration:
+        while time.time() - start_time < duration and not self.command_changed.is_set():
             # Interpolation factor (0 to 1)
             alpha = (time.time() - start_time) / duration
             alpha = min(alpha, 1.0)  # Clamp to 1.0
@@ -161,6 +176,10 @@ class HandSimulation:
             
             # Give control back to the viewer
             time.sleep(0.01)
+        
+        # Update the rest position flag
+        rest_config = get_desired_configuration("rest")
+        self.in_rest_position = np.allclose(self.data.qpos[:model.nu], rest_config, atol=1e-2)
     
     def run_simulation(self):
         """Main simulation loop"""
@@ -172,6 +191,7 @@ class HandSimulation:
             rest_config = get_desired_configuration("rest")
             self.data.qpos[:model.nu] = rest_config
             mujoco.mj_forward(self.model, self.data)
+            self.in_rest_position = True
             
             # Main loop
             while not self.exit_flag.is_set():
@@ -183,7 +203,7 @@ class HandSimulation:
                     self.command_changed.clear()
                     
                     # Skip if the command is "rest" and we're already at rest
-                    if self.current_command.lower() == "rest" and np.allclose(self.data.qpos[:model.nu], rest_config, atol=1e-3):
+                    if self.current_command.lower() == "rest" and self.in_rest_position:
                         continue
                     
                     # Get the desired configuration for the command
@@ -193,13 +213,15 @@ class HandSimulation:
                         # Move to the desired configuration
                         print(f"Moving to {self.current_command} position...")
                         self.move_to_configuration(desired_config)
+                        self.in_rest_position = (self.current_command.lower() == "rest")
                         
-                        # Hold the position for 10 seconds (if not "rest")
+                        # Hold the position for the specified time (if not "rest")
                         if self.current_command.lower() != "rest":
-                            print(f"Holding {self.current_command} position for 10 seconds...")
+                            print(f"Holding {self.current_command} position for {self.hold_time} seconds...")
                             hold_start = time.time()
                             
-                            while time.time() - hold_start < 10.0 and not self.command_changed.is_set():
+                            while (time.time() - hold_start < self.hold_time and 
+                                   not self.command_changed.is_set()):
                                 viewer.sync()
                                 time.sleep(0.1)
                             
@@ -207,10 +229,131 @@ class HandSimulation:
                             if not self.command_changed.is_set():
                                 print("Returning to rest position...")
                                 self.move_to_configuration(rest_config)
+                                self.in_rest_position = True
                     else:
                         print(f"Invalid command: {self.current_command}")
 
-def run_hand_simulation():
+def compute_features(signal):
+    """Extract features from an EMG signal channel"""
+    mav = np.mean(np.abs(signal))
+    ssc_count = sum(1 for i in range(1, len(signal) - 1)
+                    if (signal[i] - signal[i-1]) * (signal[i+1] - signal[i]) < 0)
+    zc_count = sum(1 for i in range(len(signal) - 1)
+                   if (signal[i] > 0 and signal[i+1] < 0) or (signal[i] < 0 and signal[i+1] > 0))
+    wl = np.sum(np.abs(np.diff(signal)))
+    return np.array([mav, ssc_count, zc_count, wl])
+
+def collect_fixed_samples(inlet, num_samples):
+    """Collects 'num_samples' from the LSL stream and returns (n_channels, num_samples)."""
+    collected = []
+    while len(collected) < num_samples:
+        chunk, _ = inlet.pull_chunk()
+        if chunk:
+            collected.extend(chunk)
+    return np.array(collected).T[:, :num_samples]
+
+def load_model(model_path='trained_model.pkl'):
+    """Load the trained classifier model"""
+    try:
+        with open(model_path, 'rb') as f:
+            model, scaler = pickle.load(f)
+        
+        print("Model loaded successfully")
+        return model, scaler
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        return None, None
+
+def load_hand_pose_model(model_path='hand_pose_classifier.pkl'):
+    """Load the comprehensive hand pose classifier model"""
+    try:
+        with open(model_path, 'rb') as f:
+            model_data = pickle.load(f)
+        
+        print("Hand pose classifier model loaded successfully")
+        return model_data
+    except Exception as e:
+        print(f"Error loading hand pose model: {e}")
+        return None
+
+def run_emg_controlled_simulation(model_path='trained_model.pkl', hold_time=10.0):
+    """Run the hand simulation with real-time EMG input"""
+    # Load the ML model
+    model, scaler = load_model(model_path)
+    if model is None or scaler is None:
+        print("Failed to load model. Exiting.")
+        return
+    
+    # Label mapping (update this if your model uses different labels)
+    label_map = {0: "fist", 1: "flat", 2: "okay", 3: "two", 4: "rest"}
+    
+    # Resolve LSL Stream
+    print("Looking for an EEG/EMG LSL stream...")
+    streams = resolve_byprop('name', 'test', timeout=5)
+    if not streams:
+        print("No LSL stream found. Exiting...")
+        return
+    
+    inlet = StreamInlet(streams[0])
+    print(f"Connected to stream: {streams[0].name()}")
+    
+    # Create and start the simulation
+    simulation = HandSimulation(model, data, hold_time=hold_time)
+    simulation_thread = Thread(target=simulation.run_simulation)
+    simulation_thread.daemon = True
+    simulation_thread.start()
+    
+    print("\nHand simulation started with real-time EMG control")
+    print("Press Ctrl+C to exit")
+    
+    last_prediction = "rest"
+    prediction_count = {}  # For tracking stable predictions
+    
+    try:
+        while True:
+            # Collect real-time EMG data
+            emg_data = collect_fixed_samples(inlet, window_length)
+            emg_data = emg_data[selected_channels, :]  # Select only the channels we use
+            
+            # Extract features from each channel
+            features = []
+            for ch_signal in emg_data:
+                features.extend(compute_features(ch_signal))
+            features = np.array(features).reshape(1, -1)
+            
+            # Standardize features
+            features_scaled = scaler.transform(features)
+            
+            # Predict pose
+            pose_prediction = model.predict(features_scaled)[0]
+            predicted_pose = label_map[pose_prediction]
+            
+            # Simple stability filter - only accept predictions that are stable for a while
+            if predicted_pose not in prediction_count:
+                prediction_count = {pose: 0 for pose in label_map.values()}
+                prediction_count[predicted_pose] = 1
+            else:
+                prediction_count[predicted_pose] += 1
+                
+                # If we have enough consistent predictions, execute the command
+                if prediction_count[predicted_pose] >= 3 and predicted_pose != last_prediction:
+                    print(f"Stable prediction: {predicted_pose}")
+                    simulation.set_command(predicted_pose)
+                    last_prediction = predicted_pose
+                    prediction_count = {pose: 0 for pose in label_map.values()}
+            
+            # Small sleep to prevent overwhelming the CPU
+            time.sleep(0.05)
+            
+    except KeyboardInterrupt:
+        print("\nExiting...")
+    finally:
+        # Clean up
+        simulation.set_command("exit")
+        simulation_thread.join(timeout=1.0)
+        print("Simulation ended")
+
+def run_interactive_hand_simulation():
     """Run the hand simulation with interactive command input"""
     # Create and start the simulation
     simulation = HandSimulation(model, data)
@@ -233,31 +376,19 @@ def run_hand_simulation():
     simulation_thread.join(timeout=1.0)
     print("Simulation ended")
 
-def load_model(model_path='hand_pose_classifier.pkl'):
-    """Load the trained classifier model"""
-    try:
-        with open(model_path, 'rb') as f:
-            model_data = pickle.load(f)
-        
-        print("Model loaded successfully")
-        return model_data
-    except Exception as e:
-        print(f"Error loading model: {e}")
-        return None
-
-def run_with_ml_predictions(model_path='hand_pose_classifier.pkl', continuous=True):
-    """Run the hand simulation with predictions from the ML model"""
-    # Load the model
-    model_data = load_model(model_path)
+def test_with_saved_model_data(model_path='hand_pose_classifier.pkl'):
+    """Test the hand simulation with data from the saved model"""
+    # Load the comprehensive model data
+    model_data = load_hand_pose_model(model_path)
     if model_data is None:
-        print("Failed to load model. Exiting.")
+        print("Failed to load model data. Exiting.")
         return
     
-    # Extract components
+    # Extract test data and pipeline
     pipeline = model_data['pipeline']
+    X_test = model_data['X_test']
+    y_test = model_data['y_test']
     label_map = model_data['label_map']
-    
-    # Reverse the label mapping to convert numeric predictions to gesture names
     reverse_label_map = {v: k for k, v in label_map.items()}
     
     # Create and start the simulation
@@ -266,117 +397,26 @@ def run_with_ml_predictions(model_path='hand_pose_classifier.pkl', continuous=Tr
     simulation_thread.daemon = True
     simulation_thread.start()
     
-    print("\nHand simulation started with ML model predictions")
-    print("Press Ctrl+C to exit")
+    print("\nTesting with saved model data")
     
     try:
-        if continuous:
-            # Example of continuous prediction (you would replace this with your actual input)
-            # This is where you would integrate your actual EMG data acquisition
-            test_data = model_data['X_test']  # Using saved test data for demonstration
-            
-            for i, test_sample in enumerate(test_data[:10]):  # Just using 10 samples for demo
-                # Make prediction
-                prediction = pipeline.predict(test_sample.reshape(1, -1))[0]
-                gesture_name = reverse_label_map.get(prediction, "unknown")
-                
-                print(f"Prediction {i+1}: {gesture_name} (class {prediction})")
-                
-                # Execute the predicted gesture
-                simulation.set_command(gesture_name)
-                
-                # Wait for the gesture to complete (movement + hold + return to rest)
-                # 2s movement + 10s hold + 2s return + 1s buffer = 15s
-                time.sleep(15)
-        else:
-            # Single prediction example
-            test_index = 0  # Change this to the index of the test sample you want to use
-            test_sample = model_data['X_test'][test_index]
+        # Test with a few samples
+        for i in range(min(10, len(X_test))):
+            # Get test sample
+            test_sample = X_test[i].reshape(1, -1)
             
             # Make prediction
-            prediction = pipeline.predict(test_sample.reshape(1, -1))[0]
+            prediction = pipeline.predict(test_sample)[0]
             gesture_name = reverse_label_map.get(prediction, "unknown")
+            true_gesture = reverse_label_map.get(y_test[i], "unknown")
             
-            print(f"Predicted gesture: {gesture_name} (class {prediction})")
+            print(f"Sample {i+1}: Predicted {gesture_name}, True {true_gesture}")
             
-            # Execute the predicted gesture
+            # Execute the gesture
             simulation.set_command(gesture_name)
             
-            # Wait for completion
-            time.sleep(15)
-        
-    except KeyboardInterrupt:
-        print("\nExiting...")
-    finally:
-        # Clean up
-        simulation.set_command("exit")
-        simulation_thread.join(timeout=1.0)
-        print("Simulation ended")
-
-def run_real_time_predictions(model_path='hand_pose_classifier.pkl'):
-    """
-    This function would integrate with your EMG acquisition system
-    to get real-time predictions and control the hand.
-    """
-    # Load the model
-    model_data = load_model(model_path)
-    if model_data is None:
-        print("Failed to load model. Exiting.")
-        return
-    
-    # Extract components
-    pipeline = model_data['pipeline']
-    label_map = model_data['label_map']
-    feature_params = model_data['feature_params']
-    
-    # Reverse the label mapping
-    reverse_label_map = {v: k for k, v in label_map.items()}
-    
-    # Create and start the simulation
-    simulation = HandSimulation(model, data)
-    simulation_thread = Thread(target=simulation.run_simulation)
-    simulation_thread.daemon = True
-    simulation_thread.start()
-    
-    print("\nHand simulation started with real-time EMG predictions")
-    print("Press Ctrl+C to exit")
-    
-    # Here you would add code to:
-    # 1. Initialize your EMG data acquisition system
-    # 2. Set up a loop to continuously capture EMG data
-    # 3. Process the EMG data into the same feature format used during training
-    # 4. Make predictions using the pipeline
-    # 5. Send commands to the simulation
-    
-    try:
-        # Placeholder for your real-time EMG processing code
-        print("Waiting for EMG input...")
-        
-        # Example of how the loop would work (pseudo-code):
-        """
-        while True:
-            # Get EMG data
-            emg_data = get_emg_data()
-            
-            # Extract features
-            features = extract_features(emg_data, feature_params)
-            
-            # Make prediction
-            prediction = pipeline.predict(features.reshape(1, -1))[0]
-            gesture_name = reverse_label_map.get(prediction, "unknown")
-            
-            # Execute the predicted gesture if it's changed
-            if gesture_name != current_gesture:
-                current_gesture = gesture_name
-                simulation.set_command(gesture_name)
-            
-            # Wait for the next EMG sample
-            time.sleep(0.1)
-        """
-        
-        # For demo purposes, just wait for Ctrl+C
-        while True:
-            time.sleep(1)
+            # Wait for the gesture to complete
+            time.sleep(15)  # Movement + hold + return to rest
             
     except KeyboardInterrupt:
         print("\nExiting...")
@@ -386,13 +426,11 @@ def run_real_time_predictions(model_path='hand_pose_classifier.pkl'):
         simulation_thread.join(timeout=1.0)
         print("Simulation ended")
 
-# Main entry point
-if __name__ == "__main__":    
-    # 1. For manually input commands:
-    run_hand_simulation()
+if __name__ == "__main__":
     
-    # 2. For testing with saved test data from the ML model:
-    # run_with_ml_predictions(continuous=True)
+    # Real-time EMG control
+    #run_emg_controlled_simulation(hold_time=10.0)
     
-    # 3. For real-time EMG predictions:
-    # run_real_time_predictions()
+    # Interactive manual control
+    run_interactive_hand_simulation()
+    
